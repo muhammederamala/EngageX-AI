@@ -48,12 +48,18 @@ async def chat_with_bot(message: ChatMessage):
             query=message.message
         )
         
+        # Get chatbot personality from database
+        from app.core.database import get_database
+        db = await get_database()
+        chatbot = await db.chatbots.find_one({"_id": message.chatbot_id})
+        personality = chatbot.get("personality", {"tone": "friendly"}) if chatbot else {"tone": "friendly"}
+        
         # Generate response
         response = await rag_service.generate_response(
             query=message.message,
             context=context,
             conversation_history=message.conversation_history,
-            personality={"tone": "friendly"}  # Default personality
+            personality=personality
         )
         
         return ChatResponse(**response)
