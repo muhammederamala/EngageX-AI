@@ -12,9 +12,10 @@ class Settings(BaseSettings):
     MONGODB_URI: str = "mongodb://localhost:27017/engagex"
     REDIS_URL: str = "redis://localhost:6379"
     
-    # Hugging Face Models
+    # AI Models
     HUGGINGFACE_MODEL: str = "microsoft/DialoGPT-medium"
     EMBEDDING_MODEL: str = "sentence-transformers/all-MiniLM-L6-v2"
+    GOOGLE_API_KEY: Optional[str] = None
     
     # Vector DB
     FAISS_INDEX_PATH: str = "./faiss_indexes"

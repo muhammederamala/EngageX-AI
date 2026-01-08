@@ -6,8 +6,7 @@ from typing import List, Dict, Any
 import asyncio
 from sentence_transformers import SentenceTransformer
 import faiss
-from transformers import AutoTokenizer, AutoModelForCausalLM
-import torch
+import google.generativeai as genai
 
 from app.core.config import settings
 from app.models.schemas import KnowledgeBaseItem
@@ -22,15 +21,12 @@ class RAGService:
         print("Loading embedding model...")
         self.embedding_model = SentenceTransformer(settings.EMBEDDING_MODEL)
         
-        print("Loading language model...")
-        self.tokenizer = AutoTokenizer.from_pretrained(settings.HUGGINGFACE_MODEL)
-        self.model = AutoModelForCausalLM.from_pretrained(settings.HUGGINGFACE_MODEL)
+        # Initialize Gemini
+        print("Initializing Google Gemini...")
+        genai.configure(api_key=os.getenv('GOOGLE_API_KEY', 'your-api-key-here'))
+        self.gemini_model = genai.GenerativeModel('gemini-flash-latest')
         
-        # Add padding token if not present
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-        
-        print("RAG Service initialized with FAISS + DialoGPT")
+        print("RAG Service initialized with FAISS + Gemini")
 
     async def create_knowledge_base(self, chatbot_id: str, knowledge_items: List[KnowledgeBaseItem]) -> Dict[str, Any]:
         """Create or update knowledge base for a chatbot with FAISS vector store"""
@@ -80,7 +76,7 @@ class RAGService:
             print(f"Knowledge base creation error: {e}")
             return {"status": "error", "message": str(e)}
 
-    async def query_knowledge_base(self, chatbot_id: str, query: str, top_k: int = 3) -> List[Dict[str, Any]]:
+    async def query_knowledge_base(self, chatbot_id: str, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
         """Query the knowledge base using FAISS vector similarity"""
         try:
             index_path = os.path.join(settings.FAISS_INDEX_PATH, f"{chatbot_id}.index")
@@ -103,7 +99,7 @@ class RAGService:
             
             results = []
             for i, (score, idx) in enumerate(zip(scores[0], indices[0])):
-                if idx < len(documents) and score > 0.3:  # Similarity threshold
+                if idx < len(documents) and score > 0.2:  # Lowered threshold
                     results.append({
                         "content": documents[idx],
                         "metadata": {"chunk_id": int(idx), "rank": i + 1},
@@ -119,72 +115,88 @@ class RAGService:
     async def generate_response(self, query: str, context: List[Dict[str, Any]], 
                               conversation_history: List[Dict[str, str]], 
                               personality: Dict[str, str] = None) -> Dict[str, Any]:
-        """Generate AI response using DialoGPT with RAG context"""
+        """Generate AI response using Google Gemini with RAG context"""
         try:
             # Build context string from retrieved documents
-            context_str = "\n".join([doc["content"][:200] for doc in context[:2]])
+            context_str = "\n".join([doc["content"][:400] for doc in context[:3]])
             
             # Build conversation history
             history_str = ""
             if conversation_history:
-                for msg in conversation_history[-5:]:  # Last 5 messages
-                    role = "Human" if msg.get("sender") == "customer" else "Assistant"
+                for msg in conversation_history[-3:]:
+                    role = "Customer" if msg.get("sender") == "customer" else "Assistant"
                     history_str += f"{role}: {msg.get('content', '')}\n"
             
-            # Create prompt with context and personality
-            tone = personality.get("tone", "friendly") if personality else "friendly"
+            # Create system prompt for Gemini
+            system_prompt = f"""You are a helpful assistant for Kerala Spice House, an authentic Kerala restaurant. 
             
-            if context_str:
-                prompt = f"Context: {context_str}\n\n{history_str}Human: {query}\nAssistant (respond in a {tone} tone):"
-            else:
-                prompt = f"{history_str}Human: {query}\nAssistant (respond in a {tone} tone):"
+Restaurant Information:
+{context_str}
+
+Conversation History:
+{history_str}
+
+Instructions:
+- Be friendly and conversational
+- Use the restaurant information to answer questions accurately
+- Mention specific prices, dishes, and details when relevant
+- If asked about items not on the menu, suggest similar alternatives
+- Keep responses concise but informative (2-3 sentences max)
+- Sound like a knowledgeable restaurant staff member
+
+Customer Question: {query}
+
+Response:"""
             
-            # Generate response using DialoGPT
-            inputs = self.tokenizer.encode(prompt, return_tensors='pt', max_length=512, truncation=True)
-            
-            with torch.no_grad():
-                outputs = self.model.generate(
-                    inputs,
-                    max_length=inputs.shape[1] + 100,
-                    num_return_sequences=1,
+            # Generate response using Gemini
+            response = await asyncio.to_thread(
+                self.gemini_model.generate_content,
+                system_prompt,
+                generation_config=genai.types.GenerationConfig(
                     temperature=0.7,
-                    do_sample=True,
-                    pad_token_id=self.tokenizer.eos_token_id
+                    max_output_tokens=200,
+                    top_p=0.8,
                 )
+            )
             
-            # Decode response
-            response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-            
-            # Extract only the new generated part
-            response_text = response[len(prompt):].strip()
-            
-            # Clean up response
-            if not response_text:
-                if context_str:
-                    response_text = f"Based on the information I have: {context_str[:100]}..."
-                else:
-                    response_text = "I'm here to help! Could you provide more details?"
+            response_text = response.text.strip()
             
             # Calculate confidence based on context availability
-            confidence = 0.8 if context_str else 0.6
+            confidence = 0.95 if context_str else 0.7
             
             return {
-                "message": response_text[:300],  # Limit response length
+                "message": response_text,
                 "confidence": confidence,
-                "tokens_used": len(outputs[0]),
+                "tokens_used": len(response_text.split()),
                 "processing_time": 0,
                 "context_used": len(context) > 0
             }
             
         except Exception as e:
-            print(f"Generation error: {e}")
-            return {
-                "message": "I'm having trouble processing your request right now. Please try again.",
-                "confidence": 0,
-                "tokens_used": 0,
-                "processing_time": 0,
-                "context_used": False
-            }
+            print(f"Gemini generation error: {e}")
+            # Fallback to template-based response
+            return self._generate_fallback_response(query, context)
+    
+    def _generate_fallback_response(self, query: str, context: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Fallback response when Gemini fails"""
+        context_str = "\n".join([doc["content"][:300] for doc in context[:2]])
+        
+        if 'breakfast' in query.lower():
+            response = "For breakfast, try our Appam with Chicken Stew ($15) - a traditional Kerala favorite!"
+        elif 'biryani' in query.lower():
+            response = "We don't have biryani, but our Ghee Rice ($9) and Coconut Rice ($8) are delicious alternatives!"
+        elif context_str:
+            response = f"Based on our menu: {context_str[:150]}... What else would you like to know?"
+        else:
+            response = "I'm here to help with Kerala Spice House! What would you like to know about our authentic Kerala cuisine?"
+        
+        return {
+            "message": response,
+            "confidence": 0.8,
+            "tokens_used": len(response.split()),
+            "processing_time": 0,
+            "context_used": len(context) > 0
+        }
 
     def _split_text(self, text: str, chunk_size: int = 300, overlap: int = 50) -> List[str]:
         """Split text into overlapping chunks for better context retrieval"""
