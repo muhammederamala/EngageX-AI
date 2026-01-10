@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from app.core.config import settings
 from app.api.routes import router
 from app.core.database import init_db
+from app.services.rag_data_service import init_rag_data_service
 
 load_dotenv()
 
@@ -15,6 +16,7 @@ load_dotenv()
 async def lifespan(app: FastAPI):
     # Startup
     await init_db()
+    await init_rag_data_service(settings.MONGODB_URI)
     yield
     # Shutdown
     pass
