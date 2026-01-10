@@ -46,55 +46,42 @@ class RAGService:
             print("\n========== KB CREATION START ==========")
             print("Chatbot ID:", chatbot_id)
 
-            # Process structured data and store in MongoDB
+            documents: List[str] = []
+
             for item in knowledge_items:
                 print("Processing KB item type:", item.type)
-                
-                if item.type == "text":
-                    try:
-                        # Try to parse as JSON for structured data
-                        structured_data = json.loads(item.content)
-                        await rag_data_service.store_structured_data(chatbot_id, structured_data)
-                        print("✅ Stored structured data in MongoDB")
-                    except json.JSONDecodeError:
-                        print("⚠️ Not JSON, treating as plain text")
-                        # Fallback to plain text processing
-                        pass
 
-            # Get all searchable texts for embedding
-            searchable_items = await rag_data_service.get_all_searchable_texts(chatbot_id)
-            
-            if not searchable_items:
-                print("❌ No searchable items found")
-                return {"status": "error", "message": "No searchable content"}
+                if item.type == "pdf":
+                    documents.append(item.content)
+                else:
+                    documents.extend(self._split_text(item.content))
 
-            # Create embeddings for searchable texts
-            texts = [item["text"] for item in searchable_items]
-            item_ids = [item["id"] for item in searchable_items]
-            
-            print(f"Creating embeddings for {len(texts)} items")
-            embeddings = self.embedding_model.encode(texts)
+            if not documents:
+                print("❌ No documents generated")
+                return {"status": "error", "message": "No documents to process"}
+
+            print("Total document chunks:", len(documents))
+
+            embeddings = self.embedding_model.encode(documents)
             dimension = embeddings.shape[1]
 
-            # Create FAISS index with item IDs
             index = faiss.IndexFlatIP(dimension)
             faiss.normalize_L2(embeddings)
             index.add(embeddings.astype("float32"))
 
-            # Save FAISS index and ID mapping
             index_path = os.path.join(settings.FAISS_INDEX_PATH, f"{chatbot_id}.index")
-            ids_path = os.path.join(settings.FAISS_INDEX_PATH, f"{chatbot_id}_ids.json")
+            docs_path = os.path.join(settings.FAISS_INDEX_PATH, f"{chatbot_id}.json")
 
             faiss.write_index(index, index_path)
-            with open(ids_path, "w") as f:
-                json.dump(item_ids, f)
+            with open(docs_path, "w") as f:
+                json.dump(documents, f)
 
-            print("✅ KB saved with metadata approach")
+            print("✅ KB saved")
             print("========== KB CREATION END ==========\n")
 
             return {
                 "status": "success",
-                "document_count": len(searchable_items),
+                "document_count": len(documents),
                 "embedding_dimension": dimension,
             }
 
@@ -116,38 +103,29 @@ class RAGService:
             print("Query:", query)
 
             index_path = os.path.join(settings.FAISS_INDEX_PATH, f"{chatbot_id}.index")
-            ids_path = os.path.join(settings.FAISS_INDEX_PATH, f"{chatbot_id}_ids.json")
+            docs_path = os.path.join(settings.FAISS_INDEX_PATH, f"{chatbot_id}.json")
 
-            if not os.path.exists(index_path) or not os.path.exists(ids_path):
-                print("❌ FAISS index or IDs missing")
+            if not os.path.exists(index_path) or not os.path.exists(docs_path):
+                print("❌ FAISS index or docs missing")
                 return []
 
-            # Load FAISS index and ID mapping
             index = faiss.read_index(index_path)
-            with open(ids_path, "r") as f:
-                item_ids = json.load(f)
+            with open(docs_path, "r") as f:
+                documents = json.load(f)
 
-            # Search for similar items
             query_embedding = self.embedding_model.encode([query])
             faiss.normalize_L2(query_embedding)
             scores, indices = index.search(query_embedding.astype("float32"), top_k)
 
-            # Get matching item IDs
-            matching_ids = []
+            results = []
             for score, idx in zip(scores[0], indices[0]):
-                if idx >= 0 and score > 0.3:  # Higher threshold for structured data
-                    matching_ids.append(item_ids[idx])
-                    print(f"✅ Match: {item_ids[idx]} (score: {score:.3f})")
+                if idx >= 0 and score > 0.2:
+                    results.append({
+                        "content": documents[idx],
+                        "similarity": float(score)
+                    })
 
-            # Retrieve full data from MongoDB
-            if matching_ids:
-                full_items = await rag_data_service.get_items_by_ids(chatbot_id, matching_ids)
-                results = [{"content": item, "id": item.get("id", "")} for item in full_items]
-                print(f"✅ Retrieved {len(results)} full items from DB")
-            else:
-                results = []
-                print("❌ No matches found")
-
+            print("Total RAG matches:", len(results))
             print("========== RAG QUERY END ==========\n")
             return results
 
@@ -169,21 +147,10 @@ class RAGService:
         try:
             print("\n========== RESPONSE GENERATION START ==========")
 
-            # Build context from structured data
-            context_items = []
-            for doc in context[:3]:
-                item_data = doc["content"]
-                if "name" in item_data and "price" in item_data:
-                    # Menu item
-                    context_items.append(f"{item_data['name']} - ${item_data['price']} - {item_data.get('description', '')}")
-                elif "name" in item_data and "type" in item_data:
-                    # Restaurant info
-                    context_items.append(f"{item_data['name']} - {item_data['type']} - {item_data.get('description', '')}")
-                else:
-                    # Fallback
-                    context_items.append(str(item_data)[:200])
-            
-            context_str = "\n".join(context_items)
+            # Build context from documents
+            context_str = "\n\n".join(
+                doc["content"][:400] for doc in context[:3]
+            )
 
             history_str = ""
             for msg in conversation_history[-3:]:
@@ -271,7 +238,7 @@ ANSWER:
             if chunk.strip():
                 chunks.append(chunk)
 
-        return chunks
+        return chunks if chunks else [text]
 
 
 # Singleton
