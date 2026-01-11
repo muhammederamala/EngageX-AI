@@ -4,93 +4,126 @@ import asyncio
 from typing import List, Dict, Any
 
 import faiss
+import torch
+
+from sentence_transformers import SentenceTransformer
+from transformers import AutoTokenizer, AutoModelForCausalLM
+
 from google import genai
 from google.genai.types import GenerateContentConfig
-from sentence_transformers import SentenceTransformer
 
 from app.core.config import settings
 from app.models.schemas import KnowledgeBaseItem
-from app.services.rag_data_service import rag_data_service
 
 
 class RAGService:
     def __init__(self):
-        # Ensure directories exist
+        # -------------------------------------------------
+        # CONFIG
+        # -------------------------------------------------
+        self.llm_provider = settings.LLM_PROVIDER  # "hf" | "gemini" | "simple"
+
         os.makedirs(settings.FAISS_INDEX_PATH, exist_ok=True)
         os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
 
-        # Initialize embedding model
+        # -------------------------------------------------
+        # EMBEDDINGS
+        # -------------------------------------------------
         print("🔄 Loading embedding model:", settings.EMBEDDING_MODEL)
-        self.embedding_model = SentenceTransformer(settings.EMBEDDING_MODEL)
+        try:
+            self.embedding_model = SentenceTransformer(settings.EMBEDDING_MODEL)
+            print("✅ Embedding model loaded")
+        except Exception as e:
+            print("❌ Embedding model failed:", e)
+            self.embedding_model = None
 
-        # Initialize Gemini (NEW SDK)
-        print("🔄 Initializing Google Gemini")
-        print("Using API key present:", bool(settings.GOOGLE_API_KEY))
+        # -------------------------------------------------
+        # HUGGING FACE LLM
+        # -------------------------------------------------
+        self.tokenizer = None
+        self.model = None
 
-        self.client = genai.Client(api_key=settings.GOOGLE_API_KEY)
+        if self.llm_provider == "hf":
+            try:
+                print("🔄 Loading HuggingFace model: distilgpt2")
+                self.tokenizer = AutoTokenizer.from_pretrained("distilgpt2")
+                self.model = AutoModelForCausalLM.from_pretrained("distilgpt2")
+                self.model.eval()
+                print("✅ HuggingFace model loaded")
+            except Exception as e:
+                print("❌ HF model failed:", e)
+                self.tokenizer = None
+                self.model = None
+                self.llm_provider = "simple"
 
-        # ✅ USE A VALID MODEL
-        self.model_name = "gemini-2.5-flash"
+        # -------------------------------------------------
+        # GEMINI LLM
+        # -------------------------------------------------
+        self.gemini_client = None
+        self.gemini_model = "gemini-2.5-flash"
 
-        print("✅ RAG Service initialized (FAISS + Gemini)\n")
+        if self.llm_provider == "gemini":
+            try:
+                print("🔄 Initializing Gemini client")
+                self.gemini_client = genai.Client(api_key=settings.GOOGLE_API_KEY)
+                
+                # List available models
+                try:
+                    models = self.gemini_client.models.list()
+                    print("Available models:")
+                    for model in models:
+                        print(f"  - {model.name}")
+                except Exception as e:
+                    print(f"Could not list models: {e}")
+                
+                print("✅ Gemini client ready")
+            except Exception as e:
+                print("❌ Gemini init failed:", e)
+                self.llm_provider = "simple"
+
+        print(f"✅ RAG Service initialized (LLM = {self.llm_provider})\n")
 
     # ------------------------------------------------------------------
-    # KNOWLEDGE BASE CREATION
+    # CREATE KNOWLEDGE BASE
     # ------------------------------------------------------------------
     async def create_knowledge_base(
         self,
         chatbot_id: str,
         knowledge_items: List[KnowledgeBaseItem]
     ) -> Dict[str, Any]:
-        try:
-            print("\n========== KB CREATION START ==========")
-            print("Chatbot ID:", chatbot_id)
 
-            documents: List[str] = []
+        documents: List[str] = []
 
-            for item in knowledge_items:
-                print("Processing KB item type:", item.type)
+        for item in knowledge_items:
+            if item.type == "pdf":
+                documents.append(item.content)
+            else:
+                documents.extend(self._split_text(item.content))
 
-                if item.type == "pdf":
-                    documents.append(item.content)
-                else:
-                    documents.extend(self._split_text(item.content))
+        if not documents:
+            return {"status": "error", "message": "No documents"}
 
-            if not documents:
-                print("❌ No documents generated")
-                return {"status": "error", "message": "No documents to process"}
+        embeddings = self.embedding_model.encode(documents)
+        faiss.normalize_L2(embeddings)
 
-            print("Total document chunks:", len(documents))
+        index = faiss.IndexFlatIP(embeddings.shape[1])
+        index.add(embeddings.astype("float32"))
 
-            embeddings = self.embedding_model.encode(documents)
-            dimension = embeddings.shape[1]
+        index_path = os.path.join(settings.FAISS_INDEX_PATH, f"{chatbot_id}.index")
+        docs_path = os.path.join(settings.FAISS_INDEX_PATH, f"{chatbot_id}.json")
 
-            index = faiss.IndexFlatIP(dimension)
-            faiss.normalize_L2(embeddings)
-            index.add(embeddings.astype("float32"))
+        faiss.write_index(index, index_path)
+        with open(docs_path, "w") as f:
+            json.dump(documents, f)
 
-            index_path = os.path.join(settings.FAISS_INDEX_PATH, f"{chatbot_id}.index")
-            docs_path = os.path.join(settings.FAISS_INDEX_PATH, f"{chatbot_id}.json")
-
-            faiss.write_index(index, index_path)
-            with open(docs_path, "w") as f:
-                json.dump(documents, f)
-
-            print("✅ KB saved")
-            print("========== KB CREATION END ==========\n")
-
-            return {
-                "status": "success",
-                "document_count": len(documents),
-                "embedding_dimension": dimension,
-            }
-
-        except Exception as e:
-            print("❌ Knowledge base creation error:", e)
-            return {"status": "error", "message": str(e)}
+        return {
+            "status": "success",
+            "document_count": len(documents),
+            "embedding_dimension": embeddings.shape[1],
+        }
 
     # ------------------------------------------------------------------
-    # QUERY KNOWLEDGE BASE
+    # QUERY KB
     # ------------------------------------------------------------------
     async def query_knowledge_base(
         self,
@@ -98,43 +131,29 @@ class RAGService:
         query: str,
         top_k: int = 5
     ) -> List[Dict[str, Any]]:
-        try:
-            print("\n========== RAG QUERY START ==========")
-            print("Query:", query)
 
-            index_path = os.path.join(settings.FAISS_INDEX_PATH, f"{chatbot_id}.index")
-            docs_path = os.path.join(settings.FAISS_INDEX_PATH, f"{chatbot_id}.json")
+        index_path = os.path.join(settings.FAISS_INDEX_PATH, f"{chatbot_id}.index")
+        docs_path = os.path.join(settings.FAISS_INDEX_PATH, f"{chatbot_id}.json")
 
-            if not os.path.exists(index_path) or not os.path.exists(docs_path):
-                print("❌ FAISS index or docs missing")
-                return []
-
-            index = faiss.read_index(index_path)
-            with open(docs_path, "r") as f:
-                documents = json.load(f)
-
-            query_embedding = self.embedding_model.encode([query])
-            faiss.normalize_L2(query_embedding)
-            scores, indices = index.search(query_embedding.astype("float32"), top_k)
-
-            results = []
-            for score, idx in zip(scores[0], indices[0]):
-                if idx >= 0 and score > 0.2:
-                    results.append({
-                        "content": documents[idx],
-                        "similarity": float(score)
-                    })
-
-            print("Total RAG matches:", len(results))
-            print("========== RAG QUERY END ==========\n")
-            return results
-
-        except Exception as e:
-            print("❌ Query error:", e)
+        if not os.path.exists(index_path):
             return []
 
+        index = faiss.read_index(index_path)
+        documents = json.load(open(docs_path))
+
+        query_embedding = self.embedding_model.encode([query])
+        faiss.normalize_L2(query_embedding)
+
+        scores, indices = index.search(query_embedding.astype("float32"), top_k)
+
+        return [
+            {"content": documents[idx], "similarity": float(score)}
+            for score, idx in zip(scores[0], indices[0])
+            if idx >= 0 and score > 0.2
+        ]
+
     # ------------------------------------------------------------------
-    # GENERATE RESPONSE (GEMINI + RAG)
+    # GENERATE RESPONSE
     # ------------------------------------------------------------------
     async def generate_response(
         self,
@@ -144,101 +163,156 @@ class RAGService:
         system_prompt: str = None,
     ) -> Dict[str, Any]:
 
-        try:
-            print("\n========== RESPONSE GENERATION START ==========")
+        context_str = "\n\n".join(doc["content"][:400] for doc in context[:3])
 
-            # Build context from documents
-            context_str = "\n\n".join(
-                doc["content"][:400] for doc in context[:3]
-            )
+        if self.llm_provider == "hf":
+            return await self._generate_hf(query, context_str)
 
-            history_str = ""
-            for msg in conversation_history[-3:]:
-                role = "Customer" if msg["sender"] == "customer" else "Assistant"
-                history_str += f"{role}: {msg['content']}\n"
+        if self.llm_provider == "gemini":
+            return await self._generate_gemini(query, context_str, conversation_history, system_prompt)
 
-            base_prompt = """
-You are a restaurant assistant for "Kerala Spice House".
+        return self._generate_simple(context_str)
 
-CRITICAL RULES:
-- Answer using ONLY the provided CONTEXT.
-- If information is not in the CONTEXT, reply exactly:
-"I'm sorry, I don't have that information right now."
-- Do NOT invent menu items or prices.
-- Keep responses short and polite (1–3 sentences).
-"""
+    # ------------------------------------------------------------------
+    # HUGGING FACE
+    # ------------------------------------------------------------------
+    async def _generate_hf(self, query: str, context_str: str) -> Dict[str, Any]:
+        if not self.model or not self.tokenizer:
+            return self._generate_simple(context_str)
 
-            if system_prompt:
-                base_prompt += f"\n{system_prompt}"
-
-            final_prompt = f"""
-{base_prompt}
+        prompt = f"""
+You are a helpful assistant.
+Answer ONLY from the context.
 
 CONTEXT:
 {context_str}
 
-CHAT HISTORY:
-{history_str}
-
-USER QUESTION:
+QUESTION:
 {query}
 
 ANSWER:
-"""
+""".strip()
 
-            response = await asyncio.to_thread(
-                self.client.models.generate_content,
-                model=self.model_name,
-                contents=final_prompt,
-                config=GenerateContentConfig(
-                    temperature=0.3,
-                    max_output_tokens=200,
-                    top_p=0.8,
-                )
+        inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512)
+
+        with torch.no_grad():
+            outputs = await asyncio.to_thread(
+                self.model.generate,
+                **inputs,
+                max_new_tokens=128,
+                temperature=0.7,
+                do_sample=True,
+                pad_token_id=self.tokenizer.eos_token_id
             )
 
-            # ✅ CORRECT RESPONSE ACCESS
-            text = response.candidates[0].content.parts[0].text.strip()
+        text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        answer = text.split("ANSWER:")[-1].strip()
 
-            print("✅ Gemini response:", text)
-            print("========== RESPONSE GENERATION END ==========\n")
+        if len(answer) < 5:
+            answer = "I'm sorry, I don't have that information right now."
 
-            return {
-                "message": text,
-                "confidence": 0.9 if context_str else 0.6,
-                "tokens_used": len(text.split()),
-                "processing_time": 0.0,
-                "context_used": bool(context_str),
-            }
-
-        except Exception as e:
-            print("❌ Gemini generation error:", e)
-            return {
-                "message": "I'm sorry, I don't have that information right now.",
-                "confidence": 0.4,
-                "tokens_used": 10,
-                "processing_time": 0.0,
-                "context_used": False,
-            }
+        return {
+            "message": answer,
+            "confidence": 0.75,
+            "tokens_used": len(answer.split()),
+            "processing_time": 0.0,
+            "context_used": bool(context_str),
+        }
 
     # ------------------------------------------------------------------
-    # TEXT SPLITTER
+    # GEMINI
     # ------------------------------------------------------------------
-    def _split_text(
+    async def _generate_gemini(
         self,
-        text: str,
-        chunk_size: int = 300,
-        overlap: int = 50,
-    ) -> List[str]:
+        query: str,
+        context_str: str,
+        conversation_history: List[Dict[str, str]],
+        system_prompt: str
+    ) -> Dict[str, Any]:
+
+        history = "\n".join(
+            f"{'User' if m['sender']=='customer' else 'Assistant'}: {m['content']}"
+            for m in conversation_history[-3:]
+        )
+
+        base_prompt = """
+You are an AI assistant.
+Rules:
+- Use ONLY the context
+- If answer not in context say:
+"I'm sorry, I don't have that information right now."
+"""
+
+        if system_prompt:
+            base_prompt += f"\n{system_prompt}"
+
+        prompt = f"""
+                {base_prompt}
+
+                CONTEXT:
+                {context_str}
+
+                CHAT HISTORY:
+                {history}
+
+                QUESTION:
+                {query}
+
+                ANSWER:
+                """
+
+        response = await asyncio.to_thread(
+            self.gemini_client.models.generate_content,
+            model=self.gemini_model,
+            contents=prompt,
+            config=GenerateContentConfig(
+                temperature=0.3,
+                max_output_tokens=200,
+                top_p=0.8,
+            )
+        )
+
+        text = response.candidates[0].content.parts[0].text.strip()
+
+        return {
+            "message": text,
+            "confidence": 0.9,
+            "tokens_used": len(text.split()),
+            "processing_time": 0.0,
+            "context_used": bool(context_str),
+        }
+
+    # ------------------------------------------------------------------
+    # SIMPLE FALLBACK
+    # ------------------------------------------------------------------
+    def _generate_simple(self, context_str: str) -> Dict[str, Any]:
+        if context_str:
+            return {
+                "message": context_str.split("\n")[0],
+                "confidence": 0.4,
+                "tokens_used": 15,
+                "processing_time": 0.0,
+                "context_used": True,
+            }
+
+        return {
+            "message": "I'm sorry, I don't have that information right now.",
+            "confidence": 0.2,
+            "tokens_used": 10,
+            "processing_time": 0.0,
+            "context_used": False,
+        }
+
+    # ------------------------------------------------------------------
+    # TEXT SPLIT
+    # ------------------------------------------------------------------
+    def _split_text(self, text: str, chunk_size=300, overlap=50) -> List[str]:
         words = text.split()
-        chunks = []
-
-        for i in range(0, len(words), chunk_size - overlap):
-            chunk = " ".join(words[i:i + chunk_size])
-            if chunk.strip():
-                chunks.append(chunk)
-
-        return chunks if chunks else [text]
+        return [
+            " ".join(words[i:i + chunk_size])
+            for i in range(0, len(words), chunk_size - overlap)
+            if words[i:i + chunk_size]
+        ]
 
 
 # Singleton

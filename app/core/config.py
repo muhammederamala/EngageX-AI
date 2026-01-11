@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     # Database
     MONGODB_URI: str = "mongodb://localhost:27017/engagex"
     REDIS_URL: str = "redis://localhost:6379"
+
+    LLM_PROVIDER: str = "gemini"
     
     # AI Models
     HUGGINGFACE_MODEL: str = "microsoft/DialoGPT-medium"
