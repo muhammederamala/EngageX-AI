@@ -30,15 +30,11 @@ class RAGService:
         # EMBEDDINGS
         # -------------------------------------------------
         print("🔄 Loading embedding model:", settings.EMBEDDING_MODEL)
-        try:
-            self.embedding_model = SentenceTransformer(settings.EMBEDDING_MODEL)
-            print("✅ Embedding model loaded")
-        except Exception as e:
-            print("❌ Embedding model failed:", e)
-            self.embedding_model = None
+        self.embedding_model = SentenceTransformer(settings.EMBEDDING_MODEL)
+        print("✅ Embedding model loaded")
 
         # -------------------------------------------------
-        # HUGGING FACE LLM (UNCHANGED)
+        # HUGGING FACE
         # -------------------------------------------------
         self.tokenizer = None
         self.model = None
@@ -48,19 +44,23 @@ class RAGService:
                 self.tokenizer = AutoTokenizer.from_pretrained("distilgpt2")
                 self.model = AutoModelForCausalLM.from_pretrained("distilgpt2")
                 self.model.eval()
-            except Exception:
+            except Exception as e:
+                print("❌ HF init failed:", e)
                 self.llm_provider = "simple"
 
         # -------------------------------------------------
-        # GEMINI LLM (UNCHANGED)
+        # GEMINI
         # -------------------------------------------------
         self.gemini_client = None
         self.gemini_model = "gemini-2.5-flash"
 
         if self.llm_provider == "gemini":
             try:
-                self.gemini_client = genai.Client(api_key=settings.GOOGLE_API_KEY)
-            except Exception:
+                self.gemini_client = genai.Client(
+                    api_key=settings.GOOGLE_API_KEY
+                )
+            except Exception as e:
+                print("❌ Gemini init failed:", e)
                 self.llm_provider = "simple"
 
         print(f"✅ RAG Service initialized (LLM = {self.llm_provider})\n")
@@ -98,7 +98,7 @@ class RAGService:
         }
 
     # ------------------------------------------------------------------
-    # QUERY KB (IMPROVED)
+    # QUERY KNOWLEDGE BASE
     # ------------------------------------------------------------------
     async def query_knowledge_base(
         self,
@@ -113,11 +113,7 @@ class RAGService:
         index = faiss.read_index(index_path)
         documents = json.load(open(docs_path))
 
-        # 🔥 QUERY ENRICHMENT (NO LLM)
-        enriched_query = f"""
-        About the EngageX platform, company, product, features, and services:
-        {query}
-        """.strip()
+        enriched_query = f"About EngageX platform and services: {query}"
 
         query_embedding = self.embedding_model.encode([enriched_query])
         faiss.normalize_L2(query_embedding)
@@ -126,18 +122,14 @@ class RAGService:
 
         matches = []
         for score, idx in zip(scores[0], indices[0]):
-            if idx < 0:
+            if idx < 0 or score < 0.15:
                 continue
-            if score < 0.15:  # 🚨 SIMILARITY GATE
-                continue
-
             matches.append({
                 "index": int(idx),
                 "similarity": float(score),
                 "content": documents[idx],
             })
 
-        # 🔥 Always sort manually
         matches.sort(key=lambda x: x["similarity"], reverse=True)
 
         return {
@@ -146,107 +138,60 @@ class RAGService:
         }
 
     # ------------------------------------------------------------------
-    # GENERATE RESPONSE (RESTORED LLM FUNCTIONALITY)
+    # GENERATE RESPONSE
     # ------------------------------------------------------------------
     async def generate_response(
         self,
         query: str,
         context: Dict[str, Any],
         conversation_history: List[Dict[str, str]],
-        system_prompt: str = None,
+        system_prompt: str,
     ) -> Dict[str, Any]:
 
+        if not system_prompt:
+            raise ValueError("system_prompt is required")
+
         self._debug_embeddings(query, context)
-        
-        # Extract context string from matches
+
         context_str = "\n\n".join(
-            match["content"][:400] for match in context.get("matches", [])[:3]
+            m["content"][:400] for m in context.get("matches", [])[:3]
         )
 
-        if self.llm_provider == "hf":
-            return await self._generate_hf(query, context_str)
-
         if self.llm_provider == "gemini":
-            return await self._generate_gemini(query, context_str, conversation_history, system_prompt)
+            return await self._generate_gemini(
+                query, context_str, conversation_history, system_prompt
+            )
+
+        if self.llm_provider == "hf":
+            return await self._generate_hf(
+                query, context_str, system_prompt
+            )
 
         return self._generate_simple(query, context_str)
 
     # ------------------------------------------------------------------
-    # HUGGING FACE IMPLEMENTATION
-    # ------------------------------------------------------------------
-    async def _generate_hf(self, query: str, context_str: str) -> Dict[str, Any]:
-        if not self.model or not self.tokenizer:
-            return self._generate_simple(query, context_str)
-
-        prompt = f"""You are a helpful assistant.
-Answer ONLY from the context.
-
-CONTEXT:
-{context_str}
-
-QUESTION:
-{query}
-
-ANSWER:""".strip()
-
-        inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512)
-
-        with torch.no_grad():
-            outputs = await asyncio.to_thread(
-                self.model.generate,
-                **inputs,
-                max_new_tokens=128,
-                temperature=0.7,
-                do_sample=True,
-                pad_token_id=self.tokenizer.eos_token_id
-            )
-
-        text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-        answer = text.split("ANSWER:")[-1].strip()
-
-        if len(answer) < 5:
-            answer = "I'm sorry, I don't have that information right now."
-
-        return {
-            "message": answer,
-            "confidence": 0.75,
-            "tokens_used": len(answer.split()),
-            "processing_time": 0.0,
-            "context_used": bool(context_str),
-        }
-
-    # ------------------------------------------------------------------
-    # GEMINI IMPLEMENTATION
+    # GEMINI
     # ------------------------------------------------------------------
     async def _generate_gemini(
         self,
         query: str,
         context_str: str,
-        conversation_history: List[Dict[str, str]],
+        history: List[Dict[str, str]],
         system_prompt: str
     ) -> Dict[str, Any]:
 
-        history = "\n".join(
+        chat_history = "\n".join(
             f"{'User' if m['sender']=='customer' else 'Assistant'}: {m['content']}"
-            for m in conversation_history[-3:]
+            for m in history[-3:]
         )
 
-        base_prompt = """You are an AI assistant.
-Rules:
-- Use ONLY the context
-- If answer not in context say:
-"I'm sorry, I don't have that information right now."""
-
-        if system_prompt:
-            base_prompt += f"\n{system_prompt}"
-
-        prompt = f"""{base_prompt}
+        prompt = f"""{system_prompt}
 
 CONTEXT:
 {context_str}
 
 CHAT HISTORY:
-{history}
+{chat_history}
 
 QUESTION:
 {query}
@@ -267,9 +212,57 @@ ANSWER:"""
         text = response.candidates[0].content.parts[0].text.strip()
 
         return {
-            "message": text,
+            "message": self._post_process(text),
             "confidence": 0.9,
             "tokens_used": len(text.split()),
+            "processing_time": 0.0,
+            "context_used": bool(context_str),
+        }
+
+    # ------------------------------------------------------------------
+    # HUGGING FACE
+    # ------------------------------------------------------------------
+    async def _generate_hf(
+        self,
+        query: str,
+        context_str: str,
+        system_prompt: str
+    ) -> Dict[str, Any]:
+
+        prompt = f"""{system_prompt}
+
+CONTEXT:
+{context_str}
+
+QUESTION:
+{query}
+
+ANSWER:"""
+
+        inputs = self.tokenizer(
+            prompt,
+            return_tensors="pt",
+            truncation=True,
+            max_length=512
+        )
+
+        with torch.no_grad():
+            outputs = await asyncio.to_thread(
+                self.model.generate,
+                **inputs,
+                max_new_tokens=200,
+                temperature=0.6,
+                do_sample=True,
+                pad_token_id=self.tokenizer.eos_token_id
+            )
+
+        text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        answer = text.split("ANSWER:")[-1].strip()
+
+        return {
+            "message": self._post_process(answer),
+            "confidence": 0.75,
+            "tokens_used": len(answer.split()),
             "processing_time": 0.0,
             "context_used": bool(context_str),
         }
@@ -280,13 +273,12 @@ ANSWER:"""
     def _generate_simple(self, query: str, context_str: str) -> Dict[str, Any]:
         if context_str:
             return {
-                "message": f"Based on our information: {context_str[:200]}...",
-                "confidence": 0.4,
-                "tokens_used": 15,
+                "message": context_str[:200] + "...",
+                "confidence": 0.3,
+                "tokens_used": 20,
                 "processing_time": 0.0,
                 "context_used": True,
             }
-
         return {
             "message": "I'm sorry, I don't have that information right now.",
             "confidence": 0.2,
@@ -296,7 +288,31 @@ ANSWER:"""
         }
 
     # ------------------------------------------------------------------
-    # DEBUG PRINTS (IMPROVED)
+    # POST PROCESS (CRITICAL)
+    # ------------------------------------------------------------------
+    def _post_process(self, text: str) -> str:
+        if not text or len(text.split()) < 5:
+            return "I'm sorry, I don't have that information right now."
+
+        text = text.strip()
+
+        # Remove trailing ellipsis artifacts from Gemini
+        text = text.rstrip(". ").rstrip("…")
+
+        # If response is very short, allow it as-is
+        if len(text.split()) <= 12:
+            return text + "." if not text.endswith(('.', '!', '?')) else text
+
+        # Try to keep up to 2 complete sentences
+        sentences = [s.strip() for s in text.split('.') if s.strip()]
+
+        if len(sentences) >= 2:
+            return ". ".join(sentences[:2]) + "."
+    
+        return sentences[0] + "."
+
+    # ------------------------------------------------------------------
+    # DEBUG
     # ------------------------------------------------------------------
     def _debug_embeddings(self, query: str, context: Dict[str, Any]):
         print("\n========== 🔍 RAG DEBUG ==========")
@@ -307,35 +323,26 @@ ANSWER:"""
 
         if emb is not None:
             print("Embedding shape:", emb.shape)
-            print("Embedding L2 norm:", round(float((emb ** 2).sum() ** 0.5), 4))
 
         print("Valid Matches:", len(matches))
 
         for i, m in enumerate(matches):
             print(f"\n--- Match {i + 1} ---")
-            print("Index:", m["index"])
             print("Similarity:", round(m["similarity"], 4))
-            print("Preview:", m["content"][:200].replace("\n", " "))
+            print("Preview:", m["content"][:150])
 
         print("========== 🔍 END ==========\n")
 
     # ------------------------------------------------------------------
-    # TEXT SPLIT (GOOD — JUST ADD METADATA)
+    # TEXT SPLIT
     # ------------------------------------------------------------------
     def _split_text(self, text: str) -> List[str]:
         sections = text.split("--------------------------------------------------")
-        chunks = []
-
-        for i, section in enumerate(sections):
-            section = section.strip()
-            if len(section.split()) < 30:
-                continue
-
-            chunks.append(
-                f"[SECTION {i + 1}] {section}"
-            )
-
-        return chunks
+        return [
+            f"[SECTION {i + 1}] {s.strip()}"
+            for i, s in enumerate(sections)
+            if len(s.split()) >= 30
+        ]
 
 
 # Singleton
