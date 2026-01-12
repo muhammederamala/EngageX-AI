@@ -299,17 +299,13 @@ ANSWER:"""
         # Remove trailing ellipsis artifacts from Gemini
         text = text.rstrip(". ").rstrip("…")
 
-        # If response is very short, allow it as-is
-        if len(text.split()) <= 12:
-            return text + "." if not text.endswith(('.', '!', '?')) else text
-
         # Try to keep up to 2 complete sentences
-        sentences = [s.strip() for s in text.split('.') if s.strip()]
+        text = text.rstrip("…").strip()
 
-        if len(sentences) >= 2:
-            return ". ".join(sentences[:2]) + "."
+        if not ttext.endswith(('.', '!', '?')):
+            text += '.'
     
-        return sentences[0] + "."
+        return text
 
     # ------------------------------------------------------------------
     # DEBUG
