@@ -104,7 +104,7 @@ class RAGService:
         self,
         chatbot_id: str,
         query: str,
-        top_k: int = 5
+        top_k: int = 3
     ) -> Dict[str, Any]:
 
         index_path = os.path.join(settings.FAISS_INDEX_PATH, f"{chatbot_id}.index")
@@ -181,7 +181,7 @@ class RAGService:
     ) -> Dict[str, Any]:
 
         chat_history = "\n".join(
-            f"{'User' if m['sender']=='customer' else 'Assistant'}: {m['content']}"
+            f"{'User' if m['sender'] == 'user' else 'Assistant'}: {m['content']}"
             for m in history[-3:]
         )
 
@@ -198,6 +198,8 @@ QUESTION:
 
 ANSWER:"""
 
+        print("Prompt length", len(prompt))
+
         response = await asyncio.to_thread(
             self.gemini_client.models.generate_content,
             model=self.gemini_model,
@@ -208,6 +210,8 @@ ANSWER:"""
                 top_p=0.8,
             )
         )
+
+        print("🤖 Gemini response:", response)
 
         text = response.candidates[0].content.parts[0].text.strip()
 
@@ -302,7 +306,7 @@ ANSWER:"""
         # Try to keep up to 2 complete sentences
         text = text.rstrip("…").strip()
 
-        if not ttext.endswith(('.', '!', '?')):
+        if not text.endswith(('.', '!', '?')):
             text += '.'
     
         return text
