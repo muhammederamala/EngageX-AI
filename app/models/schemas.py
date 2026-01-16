@@ -13,6 +13,7 @@ class KnowledgeBaseType(str, Enum):
     PDF = "pdf"
     URL = "url"
     FAQ = "faq"
+    MENU = "menu"
 
 
 class PersonalityTone(str, Enum):

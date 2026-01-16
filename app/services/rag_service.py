@@ -79,6 +79,9 @@ class RAGService:
         for item in knowledge_items:
             documents.extend(self._split_text(item.content))
 
+        if not documents:
+            return {"status": "empty"}
+
         embeddings = self.embedding_model.encode(documents)
         faiss.normalize_L2(embeddings)
 
@@ -95,6 +98,47 @@ class RAGService:
             "status": "success",
             "document_count": len(documents),
             "embedding_dimension": embeddings.shape[1],
+        }
+
+    async def add_knowledge_items(
+        self,
+        chatbot_id: str,
+        knowledge_items: List[KnowledgeBaseItem]
+    ) -> Dict[str, Any]:
+        """Append items to existing knowledge base"""
+        
+        # Load existing documents
+        docs_path = os.path.join(settings.FAISS_INDEX_PATH, f"{chatbot_id}.json")
+        existing_docs = []
+        if os.path.exists(docs_path):
+            existing_docs = json.load(open(docs_path))
+            
+        # Add new documents
+        new_docs = []
+        for item in knowledge_items:
+            new_docs.extend(self._split_text(item.content))
+            
+        all_docs = existing_docs + new_docs
+        
+        if not all_docs:
+            return {"status": "empty"}
+
+        # Re-index everything (simplest approach)
+        embeddings = self.embedding_model.encode(all_docs)
+        faiss.normalize_L2(embeddings)
+
+        index = faiss.IndexFlatIP(embeddings.shape[1])
+        index.add(embeddings.astype("float32"))
+
+        index_path = os.path.join(settings.FAISS_INDEX_PATH, f"{chatbot_id}.index")
+        
+        faiss.write_index(index, index_path)
+        json.dump(all_docs, open(docs_path, "w"))
+
+        return {
+            "status": "success",
+            "document_count": len(all_docs),
+            "added_count": len(new_docs)
         }
 
     # ------------------------------------------------------------------
@@ -332,6 +376,102 @@ ANSWER:"""
             print("Preview:", m["content"][:150])
 
         print("========== 🔍 END ==========\n")
+
+    # ------------------------------------------------------------------
+    # MENU PARSING
+    # ------------------------------------------------------------------
+    async def parse_menu_content(self, content: str) -> Dict[str, Any]:
+        """Parse raw menu text into structured JSON using LLM"""
+        
+        prompt = """
+        You are an advanced AI Menu Parser. Your task is to extract restaurant menu information from the provided text and convert it into a structured JSON object.
+
+        I need you to identify:
+        1. **Restaurant Info**: Name, type (cuisine), and a brief description.
+        2. **Menu Items**: Grouped by Category. For EACH item, you MUST extract:
+           - **name**: The full name of the dish.
+           - **price**: The numeric price (clean up currency symbols).
+           - **description**: Any ingredients or details described next to the item.
+           - **dietary**: An array of tags like ["veg", "non-veg", "spicy", "gluten-free"] if mentioned or inferable.
+           - **id**: A generated unique slug (e.g., "chicken-curry").
+
+        JSON STRUCTURE:
+        {
+            "restaurant": {
+                "name": "Restaurant Name",
+                "type": "Cuisine",
+                "description": "..."
+            },
+            "menu": {
+                "Starters": [
+                    {
+                        "id": "starter-1",
+                        "name": "Item Name",
+                        "description": "Delicious ingredients...",
+                        "price": 120.00,
+                        "currency": "INR",
+                        "dietary": ["veg"]
+                    }
+                ]
+            }
+        }
+
+        IMPORTANT:
+        - If a price is "120", treat it as 120.00.
+        - Capture descriptions accurately.
+        - Ensure valid JSON output.
+        - If no categories are explicit, use "General".
+
+        MENU TEXT:
+        """ + content[:15000]  # Increased context limit
+        
+        try:
+            if self.llm_provider == "gemini":
+                response = await asyncio.to_thread(
+                    self.gemini_client.models.generate_content,
+                    model=self.gemini_model,
+                    contents=prompt,
+                    config=GenerateContentConfig(
+                        temperature=0.1,
+                        response_mime_type="application/json"
+                    )
+                )
+                text = response.candidates[0].content.parts[0].text.strip()
+                
+            elif self.llm_provider == "hf":
+                # HF might struggle with complex JSON extraction, but we try
+                inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=1024)
+                with torch.no_grad():
+                    outputs = await asyncio.to_thread(
+                        self.model.generate,
+                        **inputs,
+                        max_new_tokens=1024,
+                        temperature=0.1
+                    )
+                text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+                # primitive extraction
+                if "{" in text:
+                    text = text[text.find("{"):text.rfind("}")+1]
+            
+            else:
+                # Simple mock for testing without LLM
+                return {
+                    "restaurant": {"name": "Unknown", "type": "General"},
+                    "menu": {}
+                }
+
+            # Clean up markdown if present
+            if text.startswith("```json"):
+                text = text[7:]
+            if text.endswith("```"):
+                text = text[:-3]
+                
+            return json.loads(text)
+            
+        except Exception as e:
+            print(f"❌ Menu parsing failed: {e}")
+            # Return empty structure
+            return {"restaurant": {}, "menu": {}}
 
     # ------------------------------------------------------------------
     # TEXT SPLIT
