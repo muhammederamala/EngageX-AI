@@ -31,16 +31,17 @@ async def create_chatbot(chatbot: ChatbotCreate):
     chatbot_id = chatbot.chatbot_id
     try:
         # Handle structured data for menus
-        for item in chatbot.rag_config.knowledge_base:
-            if item.type == KnowledgeBaseType.MENU and rag_data_service:
-                try:
-                    menu_data = json.loads(item.content)
-                    await rag_data_service.store_structured_data(chatbot_id, menu_data)
-                    print(f"✅ Stored structured menu data for {chatbot_id}")
-                except Exception as e:
-                    print(f"⚠️ Failed to store structured menu data: {e}")
+        # for item in chatbot.rag_config.knowledge_base:
+        #     if item.type == KnowledgeBaseType.MENU and rag_data_service:
+        #         try:
+        #             menu_data = json.loads(item.content)
+        #             await rag_data_service.store_structured_data(chatbot_id,item._id, menu_data)
+        #             print(f"✅ Stored structured menu data for {chatbot_id}")
+        #         except Exception as e:
+        #             print(f"⚠️ Failed to store structured menu data: {e}")
 
         # Create initial knowledge base (Vector DB)
+        print(chatbot)
         result = await rag_service.create_knowledge_base(
             chatbot_id=chatbot_id,
             knowledge_items=chatbot.rag_config.knowledge_base
@@ -88,6 +89,8 @@ async def chat_with_bot(request: ChatRequest):
             chatbot_id=request.chatbot_id,
             query=request.message
         )
+
+        return None
 
         # 2. Generate response with system prompt
         response = await rag_service.generate_response(

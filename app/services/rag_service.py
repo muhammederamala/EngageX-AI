@@ -74,30 +74,45 @@ class RAGService:
         knowledge_items: List[KnowledgeBaseItem]
     ) -> Dict[str, Any]:
 
-        documents: List[str] = []
+        chatbot_dir = os.path.join(settings.FAISS_INDEX_PATH, chatbot_id)
+        os.makedirs(chatbot_dir, exist_ok=True)
+
+        results = {}
 
         for item in knowledge_items:
-            documents.extend(self._split_text(item.content))
+            documents = []
+            if item.type == "menu":
+                documents = self._parseJsonMenu(item.content)
+            else:
+                documents = self._split_text(item.content)
 
-        if not documents:
-            return {"status": "empty"}
+            print(len(documents))
 
-        embeddings = self.embedding_model.encode(documents)
-        faiss.normalize_L2(embeddings)
+            if not documents:
+                continue
 
-        index = faiss.IndexFlatIP(embeddings.shape[1])
-        index.add(embeddings.astype("float32"))
+            embeddings = self.embedding_model.encode(documents)
+            faiss.normalize_L2(embeddings)
 
-        index_path = os.path.join(settings.FAISS_INDEX_PATH, f"{chatbot_id}.index")
-        docs_path = os.path.join(settings.FAISS_INDEX_PATH, f"{chatbot_id}.json")
+            index = faiss.IndexFlatIP(embeddings.shape[1])
+            index.add(embeddings.astype("float32"))
 
-        faiss.write_index(index, index_path)
-        json.dump(documents, open(docs_path, "w"))
+            index_path = os.path.join(chatbot_dir, f"{item._id}.index")
+            docs_path = os.path.join(chatbot_dir, f"{item._id}.json")
+
+            faiss.write_index(index, index_path)
+
+            with open(docs_path, "w") as f:
+                json.dump(documents, f)
+
+            results[item.id] = {
+                "document_count": len(documents),
+                "embedding_dimension": embeddings.shape[1]
+            }
 
         return {
             "status": "success",
-            "document_count": len(documents),
-            "embedding_dimension": embeddings.shape[1],
+            "knowledge_bases": results
         }
 
     async def add_knowledge_items(
@@ -148,37 +163,70 @@ class RAGService:
         self,
         chatbot_id: str,
         query: str,
-        top_k: int = 3
+        top_k: int = 3,
+        score_threshold: float = 0.15
     ) -> Dict[str, Any]:
 
-        index_path = os.path.join(settings.FAISS_INDEX_PATH, f"{chatbot_id}.index")
-        docs_path = os.path.join(settings.FAISS_INDEX_PATH, f"{chatbot_id}.json")
+        chatbot_dir = os.path.join(settings.FAISS_INDEX_PATH, chatbot_id)
+        if not os.path.exists(chatbot_dir):
+            return {"matches": []}
 
-        index = faiss.read_index(index_path)
-        documents = json.load(open(docs_path))
-
-        enriched_query = f"About EngageX platform and services: {query}"
+        enriched_query = f"{query}"
 
         query_embedding = self.embedding_model.encode([enriched_query])
         faiss.normalize_L2(query_embedding)
 
-        scores, indices = index.search(query_embedding.astype("float32"), top_k)
+        kb_results = []
 
-        matches = []
-        for score, idx in zip(scores[0], indices[0]):
-            if idx < 0 or score < 0.15:
+        for filename in os.listdir(chatbot_dir):
+            if not filename.endswith(".index"):
                 continue
-            matches.append({
-                "index": int(idx),
-                "similarity": float(score),
-                "content": documents[idx],
+
+            knowledge_base_id = filename.replace(".index", "")
+
+            index_path = os.path.join(chatbot_dir, filename)
+            docs_path = os.path.join(chatbot_dir, f"{knowledge_base_id}.json")
+
+            index = faiss.read_index(index_path)
+            documents = json.load(open(docs_path))
+
+            scores, indices = index.search(
+                query_embedding.astype("float32"),
+                top_k
+            )
+
+            matches = []
+            for score, idx in zip(scores[0], indices[0]):
+                if idx < 0 or score < score_threshold:
+                    continue
+                matches.append({
+                    "chunk_index": int(idx),
+                    "similarity": float(score),
+                    "content": documents[idx]
+                })
+
+            if not matches:
+                continue
+
+            avg_score = sum(m["similarity"] for m in matches) / len(matches)
+
+            kb_results.append({
+                "knowledge_base_id": knowledge_base_id,
+                "avg_score": avg_score,
+                "matches": matches
             })
 
-        matches.sort(key=lambda x: x["similarity"], reverse=True)
+        if not kb_results:
+            return {"matches": []}
+
+        # Rank KBs, not chunks
+        kb_results.sort(key=lambda x: x["avg_score"], reverse=True)
+
+        best_kb = kb_results[0]
 
         return {
-            "query_embedding": query_embedding[0],
-            "matches": matches,
+            "selected_knowledge_base": best_kb["knowledge_base_id"],
+            "matches": best_kb["matches"]
         }
 
     # ------------------------------------------------------------------
@@ -483,6 +531,16 @@ ANSWER:"""
             for i, s in enumerate(sections)
             if len(s.split()) >= 30
         ]
+
+    def _parseJsonMenu(self, content: str):
+        parsed = json.loads(content)
+        documents = []
+
+        # Each root key = one chunk
+        for key, value in parsed.items():
+            chunk = f"{key}: {json.dumps(value, ensure_ascii=False)}"
+            documents.append(chunk)
+        return documents
 
 
 # Singleton
