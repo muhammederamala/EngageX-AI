@@ -16,6 +16,10 @@ class KnowledgeBaseType(str, Enum):
     MENU = "menu"
 
 
+class KnowledgeBaseCategory(str, Enum):
+    DOCUMENT = "document"
+    MENU = "menu"
+
 class PersonalityTone(str, Enum):
     PROFESSIONAL = "professional"
     FRIENDLY = "friendly"
@@ -40,9 +44,14 @@ class ConversationMessage(BaseModel):
 # =========================
 
 class KnowledgeBaseItem(BaseModel):
+    id: Optional[str] = None
+    category: KnowledgeBaseCategory
     type: KnowledgeBaseType
     content: str
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    class Config:
+        extra = "ignore"
 
 
 class RAGConfig(BaseModel):

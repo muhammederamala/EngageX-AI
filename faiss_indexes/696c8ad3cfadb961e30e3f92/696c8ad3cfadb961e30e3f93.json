@@ -1,0 +1,11 @@
+[
+  "Category: Appetizers\nId: app_kerala_fish_fry\nName: Kerala Fish Fry\nDescription: Fresh fish marinated in Kerala spices and shallow fried\nPrice: 12\nCurrency: INR\nDietary: gluten-free",
+  "Category: Appetizers\nId: app_banana_chips\nName: Banana Chips\nDescription: Crispy fried raw banana slices served with coconut chutney\nPrice: 6\nCurrency: INR\nDietary: vegan, gluten-free",
+  "Category: Main Courses\nId: main_fish_curry\nName: Fish Curry (Meen Curry)\nDescription: Traditional Kerala fish curry cooked with coconut milk\nPrice: 18\nCurrency: INR\nDietary: gluten-free",
+  "Category: Main Courses\nId: main_appam_stew\nName: Appam with Stew\nDescription: Soft fermented rice pancakes served with chicken or vegetable stew\nPrice: 15\nCurrency: INR\nDietary: vegetarian",
+  "Category: Rice Breads\nId: rb_appam\nName: Appam\nPrice: 3\nCurrency: INR\nDietary: vegetarian",
+  "Category: Beverages\nId: bev_coconut_water\nName: Fresh Coconut Water\nPrice: 5\nCurrency: INR\nDietary: vegan",
+  "Category: Beverages\nId: bev_buttermilk\nName: Buttermilk (Sambharam)\nPrice: 4\nCurrency: INR\nDietary: vegetarian",
+  "Category: Desserts\nId: des_payasam\nName: Payasam\nDescription: Traditional Kerala sweet pudding\nPrice: 6\nCurrency: INR\nDietary: vegetarian, gluten-free",
+  "Category: Desserts\nId: des_banana_halwa\nName: Banana Halwa\nDescription: Dense banana-based sweet\nPrice: 5\nCurrency: INR\nDietary: vegan, gluten-free"
+]

@@ -2,6 +2,7 @@ import os
 import json
 import asyncio
 from typing import List, Dict, Any
+import re
 
 import faiss
 import torch
@@ -81,8 +82,8 @@ class RAGService:
 
         for item in knowledge_items:
             documents = []
-            if item.type == "menu":
-                documents = self._parseJsonMenu(item.content)
+            if item.category == "menu":
+                documents = self._chunk_json_menu(item.content)
             else:
                 documents = self._split_text(item.content)
 
@@ -97,8 +98,8 @@ class RAGService:
             index = faiss.IndexFlatIP(embeddings.shape[1])
             index.add(embeddings.astype("float32"))
 
-            index_path = os.path.join(chatbot_dir, f"{item._id}.index")
-            docs_path = os.path.join(chatbot_dir, f"{item._id}.json")
+            index_path = os.path.join(chatbot_dir, f"{item.id}.index")
+            docs_path = os.path.join(chatbot_dir, f"{item.id}.json")
 
             faiss.write_index(index, index_path)
 
@@ -244,6 +245,8 @@ class RAGService:
             raise ValueError("system_prompt is required")
 
         self._debug_embeddings(query, context)
+
+        return None
 
         context_str = "\n\n".join(
             m["content"][:400] for m in context.get("matches", [])[:3]
@@ -440,7 +443,7 @@ ANSWER:"""
            - **name**: The full name of the dish.
            - **price**: The numeric price (clean up currency symbols).
            - **description**: Any ingredients or details described next to the item.
-           - **dietary**: An array of tags like ["veg", "non-veg", "spicy", "gluten-free"] if mentioned or inferable.
+           - **dietary**: An array of tags like ["veg", "non-veg", "spicy", "gluten-free"] if mentioned.
            - **id**: A generated unique slug (e.g., "chicken-curry").
 
         JSON STRUCTURE:
@@ -524,24 +527,92 @@ ANSWER:"""
     # ------------------------------------------------------------------
     # TEXT SPLIT
     # ------------------------------------------------------------------
-    def _split_text(self, text: str) -> List[str]:
-        sections = text.split("--------------------------------------------------")
-        return [
-            f"[SECTION {i + 1}] {s.strip()}"
-            for i, s in enumerate(sections)
-            if len(s.split()) >= 30
-        ]
 
-    def _parseJsonMenu(self, content: str):
+    def _split_text(self, text: str) -> List[str]:
+        """
+        Semantic chunking with deterministic overlap.
+        Ideal for cosine similarity + RAG.
+        """
+
+        MAX_WORDS = 40
+        OVERLAP_WORDS = 10
+        MIN_WORDS = 12
+
+        # 1️⃣ Split by explicit sections if present
+        sections = re.split(r'-{10,}', text)
+
+        chunks = []
+
+        for section in sections:
+            section = section.strip()
+            if not section:
+                continue
+
+            # 2️⃣ Sentence split
+            sentences = re.split(r'(?<=[.!?])\s+', section)
+
+            words = []
+            for sentence in sentences:
+                words.extend(sentence.split())
+
+            if len(words) < MIN_WORDS:
+                continue
+
+            # 3️⃣ Sliding window with overlap
+            start = 0
+            while start < len(words):
+                end = start + MAX_WORDS
+                chunk_words = words[start:end]
+
+                if len(chunk_words) >= MIN_WORDS:
+                    chunks.append(" ".join(chunk_words))
+
+                start = end - OVERLAP_WORDS  # 👈 overlap happens here
+                if start < 0:
+                    start = 0
+
+        return chunks
+
+    def _chunk_json_menu(self, content: str):
         parsed = json.loads(content)
+
+        print("parsed", parsed)
         documents = []
 
-        # Each root key = one chunk
-        for key, value in parsed.items():
-            chunk = f"{key}: {json.dumps(value, ensure_ascii=False)}"
-            documents.append(chunk)
-        return documents
+        # Navigate safely to menu
+        menu = parsed.get("menu", {})
+        if not isinstance(menu, dict):
+            return documents
 
+        for category, items in menu.items():
+            if not isinstance(items, list):
+                continue
+
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                chunk_lines = [f"Category: {category}"]
+
+
+                for key, value in item.items():
+                    if value is None or value == "":
+                        continue
+
+                    # Normalize values for semantic readability
+                    if isinstance(value, list):
+                        value = ", ".join(map(str, value))
+                    elif isinstance(value, dict):
+                        value = json.dumps(value, ensure_ascii=False)
+
+                    label = key.replace("_", " ").title()
+                    chunk_lines.append(f"{label}: {value}")
+
+                chunk_text = "\n".join(chunk_lines)
+                documents.append(chunk_text)
+
+        print("documents",documents)
+
+        return documents
 
 # Singleton
 rag_service = RAGService()
