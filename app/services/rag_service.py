@@ -115,6 +115,52 @@ class RAGService:
             "status": "success",
             "knowledge_bases": results
         }
+    
+    async def update_knowledge_base(
+        self,
+        chatbot_id: str,
+        knowledge_items: List[KnowledgeBaseItem]
+    ) -> Dict[str, Any]:
+        chatbot_dir = os.path.join(settings.FAISS_INDEX_PATH, chatbot_id)
+        os.makedirs(chatbot_dir, exist_ok=True)
+
+        results = {}
+
+        for item in knowledge_items:
+            documents = []
+            if item.category == "menu":
+                documents = self._chunk_json_menu(item.content)
+            else:
+                documents = self._split_text(item.content)
+
+            print(len(documents))
+
+            if not documents:
+                continue
+
+            embeddings = self.embedding_model.encode(documents)
+            faiss.normalize_L2(embeddings)
+
+            index = faiss.IndexFlatIP(embeddings.shape[1])
+            index.add(embeddings.astype("float32"))
+
+            index_path = os.path.join(chatbot_dir, f"{item.id}.index")
+            docs_path = os.path.join(chatbot_dir, f"{item.id}.json")
+
+            faiss.write_index(index, index_path)
+
+            with open(docs_path, "w") as f:
+                json.dump(documents, f)
+
+            results[item.id] = {
+                "document_count": len(documents),
+                "embedding_dimension": embeddings.shape[1]
+            }
+
+        return {
+            "status":"success",
+            "knowledge_bases": results
+        }
 
     async def add_knowledge_items(
         self,
