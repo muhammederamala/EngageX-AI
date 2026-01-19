@@ -292,8 +292,6 @@ class RAGService:
 
         self._debug_embeddings(query, context)
 
-        return None
-
         context_str = "\n\n".join(
             m["content"][:400] for m in context.get("matches", [])[:3]
         )
@@ -355,6 +353,7 @@ ANSWER:"""
         print("🤖 Gemini response:", response)
 
         text = response.candidates[0].content.parts[0].text.strip()
+        print("text",text)
 
         return {
             "message": self._post_process(text),
@@ -436,7 +435,7 @@ ANSWER:"""
     # POST PROCESS (CRITICAL)
     # ------------------------------------------------------------------
     def _post_process(self, text: str) -> str:
-        if not text or len(text.split()) < 5:
+        if not text:
             return "I'm sorry, I don't have that information right now."
 
         text = text.strip()
@@ -504,10 +503,12 @@ ANSWER:"""
                     {
                         "id": "starter-1",
                         "name": "Item Name",
+                        "price": 120.00 rupees,
                         "description": "Delicious ingredients...",
-                        "price": 120.00,
                         "currency": "INR",
-                        "dietary": ["veg"]
+                        "dietary": ["veg"],
+                        "mealType": ["lunch","breakfast"],
+                        course_type: "starter"
                     }
                 ]
             }
