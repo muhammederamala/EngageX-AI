@@ -324,18 +324,20 @@ class RAGService:
             for m in history[-3:]
         )
 
-        prompt = f"""{system_prompt}
+        prompt = f"""
+        {system_prompt}
 
-CONTEXT:
-{context_str}
+        CONTEXT:
+        {context_str}
 
-CHAT HISTORY:
-{chat_history}
+        CHAT HISTORY:
+        {chat_history}
 
-QUESTION:
-{query}
+        QUESTION:
+        {query}
 
-ANSWER:"""
+        ANSWER:
+        """
 
         print("Prompt length", len(prompt))
 
