@@ -663,5 +663,97 @@ ANSWER:"""
 
         return documents
 
+    # ------------------------------------------------------------------
+    # INTENT POOLS
+    # ------------------------------------------------------------------
+
+    async def get_embeddings(self, texts: List[str]) -> List[List[float]]:
+        """Generic embedding function"""
+        if not texts:
+            return []
+        
+        embeddings = self.embedding_model.encode(texts)
+        faiss.normalize_L2(embeddings)
+        return embeddings.tolist()
+
+    async def create_intent_pool(self, pool_id: str, intents: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Create and store a FAISS index for an intent pool"""
+        intent_pool_dir = os.path.join(settings.FAISS_INDEX_PATH, "intent_pools")
+        os.makedirs(intent_pool_dir, exist_ok=True)
+        
+        pool_path = os.path.join(intent_pool_dir, pool_id)
+        os.makedirs(pool_path, exist_ok=True)
+
+        if not intents:
+            return {"status": "error", "message": "No intents provided"}
+
+        # Extract texts for embedding
+        intent_texts = [item["text"] for item in intents]
+        
+        embeddings = self.embedding_model.encode(intent_texts)
+        faiss.normalize_L2(embeddings)
+
+        index = faiss.IndexFlatIP(embeddings.shape[1])
+        index.add(embeddings.astype("float32"))
+
+        index_path = os.path.join(pool_path, "index.faiss")
+        docs_path = os.path.join(pool_path, "intents.json")
+
+        faiss.write_index(index, index_path)
+
+        # Store full objects to retain ID and other metadata
+        with open(docs_path, "w") as f:
+            json.dump(intents, f)
+
+        return {
+            "pool_id": pool_id,
+            "count": len(intents),
+            "dimension": embeddings.shape[1]
+        }
+
+    async def query_intent_pool(self, pool_id: str, query: str, top_k: int = 3) -> Dict[str, Any]:
+        """Search for the most similar intents in a pool"""
+        intent_pool_dir = os.path.join(settings.FAISS_INDEX_PATH, "intent_pools", pool_id)
+        if not os.path.exists(intent_pool_dir):
+            return {"matches": []}
+
+        index_path = os.path.join(intent_pool_dir, "index.faiss")
+        docs_path = os.path.join(intent_pool_dir, "intents.json")
+
+        if not os.path.exists(index_path) or not os.path.exists(docs_path):
+            return {"matches": []}
+
+        index = faiss.read_index(index_path)
+        with open(docs_path, "r") as f:
+            intents = json.load(f)
+
+        query_embedding = self.embedding_model.encode([query])
+        faiss.normalize_L2(query_embedding)
+
+        scores, indices = index.search(query_embedding.astype("float32"), top_k)
+
+        matches = []
+        for score, idx in zip(scores[0], indices[0]):
+            if idx < 0:
+                continue
+            
+            intent_data = intents[idx]
+            # Handle both string (legacy) and dict formats
+            if isinstance(intent_data, str):
+                matches.append({
+                    "text": intent_data,
+                    "score": float(score)
+                })
+            else:
+                matches.append({
+                    "id": intent_data.get("id"),
+                    "text": intent_data.get("text"),
+                    "category": intent_data.get("category"),
+                    "layer": intent_data.get("layer"),
+                    "score": float(score)
+                })
+
+        return {"matches": matches}
+
 # Singleton
 rag_service = RAGService()

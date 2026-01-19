@@ -163,3 +163,22 @@ class ProcessingStatus(BaseModel):
     progress: Optional[int] = None
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
+
+
+# =========================
+# Intent Pools
+# =========================
+
+class IntentItem(BaseModel):
+    id: str
+    text: str
+    category: Optional[str] = None
+    layer: Optional[int] = None
+
+class IntentPoolUpload(BaseModel):
+    pool_id: str
+    intents: List[IntentItem]
+
+class IntentPoolResponse(BaseModel):
+    pool_id: str
+    count: int

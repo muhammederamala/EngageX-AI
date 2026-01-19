@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, BackgroundTasks
-from typing import List
+from typing import List, Dict, Any, Optional
 import json
 
 from app.models.schemas import (
@@ -12,7 +12,9 @@ from app.models.schemas import (
     BehaviorAnalysis,
     BehaviorInsights,
     KnowledgeBaseItem,
-    KnowledgeBaseType
+    KnowledgeBaseType,
+    IntentPoolUpload,
+    IntentPoolResponse
 )
 from app.services.rag_service import rag_service
 from app.services.ai_service import ai_service
@@ -205,6 +207,54 @@ async def upload_knowledge_file(
     except Exception as e:
         print(f"❌ Upload error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# ---------------------------------------------------------
+# Intent Pools
+# ---------------------------------------------------------
+
+@router.post("/intent-pools/upload", response_model=IntentPoolResponse)
+async def upload_intent_pool(payload: IntentPoolUpload):
+    """Process intent pool and store in FAISS"""
+    try:
+        intents_data = [intent.dict() for intent in payload.intents]
+        result = await rag_service.create_intent_pool(
+            pool_id=payload.pool_id,
+            intents=intents_data
+        )
+        return IntentPoolResponse(**result)
+    except Exception as e:
+        print(f"❌ Intent pool upload error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/intent-pools/{pool_id}/query", response_model=dict)
+async def query_intent_pool(pool_id: str, payload: Dict[str, Any]):
+    """Query an intent pool for similar intents"""
+    try:
+        query = payload.get("query", "")
+        top_k = payload.get("top_k", 3)
+        result = await rag_service.query_intent_pool(
+            pool_id=pool_id,
+            query=query,
+            top_k=top_k
+        )
+        return result
+    except Exception as e:
+        print(f"❌ Intent pool query error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/embeddings", response_model=Dict[str, Any])
+async def get_generic_embeddings(payload: Dict[str, List[str]]):
+    """Get embeddings for a list of texts"""
+    try:
+        texts = payload.get("texts", [])
+        embeddings = await rag_service.get_embeddings(texts)
+        return {"embeddings": embeddings, "count": len(embeddings)}
+    except Exception as e:
+        print(f"❌ Embeddings error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # ---------------------------------------------------------
 # Health
