@@ -99,6 +99,7 @@ class ChatRequest(BaseModel):
         alias="conversationHistory"
     )
     system_prompt: Optional[str] = Field(None, alias="systemPrompt")
+    intents: Optional[List[str]] = None
 
     class Config:
         populate_by_name = True  # ✅ critical

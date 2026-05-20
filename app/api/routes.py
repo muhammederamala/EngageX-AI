@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, BackgroundTasks
 from typing import List, Dict, Any, Optional
+import asyncio
 import json
 
 from app.models.schemas import (
@@ -88,8 +89,17 @@ async def chat_with_bot(request: ChatRequest):
         # 1. Retrieve context from vector DB
         context = await rag_service.query_knowledge_base(
             chatbot_id=request.chatbot_id,
-            query=request.message
+            query=request.message,
         )
+
+        intents_matched = await asyncio.gather(
+            *[
+                rag_service.query_intent_pool(intent, request.message)
+                for intent in request.intents
+            ]
+        )
+
+        print("matched intents", intents_matched)
 
         # 2. Generate response with system prompt
         response = await rag_service.generate_response(
